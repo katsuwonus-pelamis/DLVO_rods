@@ -4,15 +4,39 @@ from functools import lru_cache
 from abc import ABC, abstractmethod
 
 def circle_overlap_area(r1: float, r2: float, d: float) -> float:
-    if d >= r1 + r2:
-        return 0.0
-    if d <= abs(r1 - r2):
-        return float(np.pi * min(r1, r2) ** 2)
+    d = np.asarray(d, dtype=float)
+    # ensure r1,r2 are scalars
+    r1 = float(np.asarray(r1))
+    r2 = float(np.asarray(r2))
 
-    term1 = r1**2 * np.arccos((d**2 + r1**2 - r2**2) / (2 * d * r1))
-    term2 = r2**2 * np.arccos((d**2 + r2**2 - r1**2) / (2 * d * r2))
-    term3 = 0.5 * np.sqrt((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2))
-    return term1 + term2 - term3
+    sumr = r1 + r2
+    diffr = abs(r1 - r2)
+
+    area = np.zeros_like(d, dtype=float)
+
+    mask_no_overlap = d >= sumr
+    mask_full_containment = d <= diffr
+    mask_partial = ~(mask_no_overlap | mask_full_containment)
+
+    if np.any(mask_full_containment):
+        area[mask_full_containment] = np.pi * min(r1, r2) ** 2
+
+    if np.any(mask_partial):
+        dp = d[mask_partial]
+        # safe arccos arguments clipped to [-1, 1]
+        arg1 = (dp**2 + r1**2 - r2**2) / (2 * dp * r1)
+        arg2 = (dp**2 + r2**2 - r1**2) / (2 * dp * r2)
+        arg1 = np.clip(arg1, -1.0, 1.0)
+        arg2 = np.clip(arg2, -1.0, 1.0)
+
+        term1 = r1**2 * np.arccos(arg1)
+        term2 = r2**2 * np.arccos(arg2)
+        term3 = 0.5 * np.sqrt(
+            (-dp + r1 + r2) * (dp + r1 - r2) * (dp - r1 + r2) * (dp + r1 + r2)
+        )
+        area[mask_partial] = term1 + term2 - term3
+    #print(area)
+    return area.item() if area.ndim == 0 else area
 
 @dataclass(frozen=True)
 class PhysicalConstants:
@@ -25,7 +49,7 @@ class PhysicalConstants:
 class Surfactant:
     cmc: float
     aggregation_number: float
-    molecular_volume: float
+    mycel_diameter: float
     charge_fraction: float
     delta: float
     
@@ -33,9 +57,12 @@ class Surfactant:
     def ionic_strength(self, concentration: float) -> float:
         return self.cmc + self.charge_fraction * (concentration - self.cmc)
     
-    @lru_cache(maxsize=128)
-    def D_CTAC(self)-> float:
-        return 2*(3*self.aggregation_number*self.molecular_volume/(4*np.pi))**(1/3) 
+    #arguments to be made on whether to hard code it as a member since we kind of have it....
+    #@lru_cache(maxsize=128)
+    #def D_mycel(self)-> float:
+    #    #return 2*(3*self.aggregation_number*self.molecular_volume/(4*np.pi))**(1/3) 
+    #    print(np.cbrt(6*self.molecular_volume))
+     #   return np.cbrt(6*self.molecular_volume)
     
     @lru_cache(maxsize=128)
     def n_micelles(self, concentration: float, constants: PhysicalConstants) -> float:
@@ -52,7 +79,7 @@ class Surfactant:
     @lru_cache(maxsize=128)
     def effective_depletant_diameter(self, concentration: float, env: "SolutionState") -> float:
         kappa = env.inverse_debye(self.ionic_strength(concentration))
-        return self.D_CTAC() + 2.0 * self.delta / kappa
+        return self.mycel_diameter + 2.0 * self.delta / kappa
 
     @lru_cache(maxsize=128)
     def phi_eff(self, concentration: float, env: "SolutionState") -> float:
@@ -146,10 +173,9 @@ class ElectrostaticInteraction:
         r1 = a.width / 2.0 + solution.layer_thickness
         r2 = b.width / 2.0 + solution.layer_thickness
         gap = separation - r1 - r2
-
         ionic_strength = solution.total_ionic_strength(concentration)
         kappa = solution.inverse_debye(ionic_strength)
-        prefactor = np.sqrt(kappa / (2.0 * np.pi) * (r1 * r2 / (r1 + r2))) * self.Z(concentration, solution)
+        prefactor = np.sqrt(kappa / (2.0 * np.pi) * (r1 * r2 / (r1 + r2))) * self.Z(solution)
 
         energy = np.full_like(gap, np.inf, dtype=float)
         mask = gap > 0
@@ -157,27 +183,34 @@ class ElectrostaticInteraction:
 
         return energy.item() if energy.ndim == 0 else energy
     
-    def Z(self, concentration: float, solution) -> float:
-        return 64.0 * np.pi*solution.constants.eps_0 * solution.eps_r * (solution.constants.k_B * solution.temperature / solution.constants.e_charge)** 2 *np.tanh(solution.constants.e_charge *solution.zeta_pot* solution.total_ionic_strength(concentration)/ (4.0 * solution.constants.k_B * solution.temperature)) ** 2
+    def Z(self, solution) -> float:
+        return 64.0 * np.pi*solution.constants.eps_0 * solution.eps_r * (solution.constants.k_B * solution.temperature / solution.constants.e_charge)** 2 *np.tanh(solution.constants.e_charge *solution.zeta_pot/ (4.0 * solution.constants.k_B * solution.temperature)) ** 2
     
     
     
 @dataclass(frozen=True)
-class DepletionInteraction():
-    depletant: Surfactant
+class DepletionInteraction:
+    def energy(self, a, b, separation, solution, concentration):
+        sep = np.asarray(separation, dtype=float)
+        t_eff = solution.layer_thickness
 
-    def pair_energy_per_length(self, a, b, separation, solution, concentration):
-        depl_D = self.depletant.effective_depletant_diameter(concentration, solution)
-        t_eff = solution.layer_thickness   #we need to sort this out, more specifically need to look for the actual delta - keep in mind that in principle it's a different surfactant from the one forming mycels
+        energy = np.zeros_like(sep, dtype=float)
 
-        r1 = a.width / 2.0 + t_eff + depl_D / 2.0
-        r2 = b.width / 2.0 + t_eff + depl_D / 2.0
+        # two surfactants: fractions = composition and (1 - composition)
+        fracs = (solution.composition, 1.0 - solution.composition)
+        for idx, frac in enumerate(fracs):
+            surf = solution.surfactants[idx]
+            conc_i = frac * concentration
+            depl_D = surf.effective_depletant_diameter(conc_i, solution)
 
-        if separation >= r1 + r2:
-            return 0.0
+            r1 = a.width / 2.0 + t_eff + depl_D / 2.0
+            r2 = b.width / 2.0 + t_eff + depl_D / 2.0
+            overlap = circle_overlap_area(r1, r2, sep)
+            pressure = surf.osmotic_pressure(conc_i, solution)
+            print(pressure)
+            energy += -pressure * overlap
 
-        overlap = circle_overlap_area(r1, r2, separation)
-        return -self.depletant.osmotic_pressure(concentration, solution) * overlap
+        return energy.item() if energy.ndim == 0 else energy
     
     
 '''
