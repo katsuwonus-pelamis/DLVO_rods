@@ -1,4 +1,3 @@
-#classes are supposed to work at fixed concentration ?
 import numpy as np
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -74,8 +73,10 @@ class SolutionState:
     eps_r: float
     layer_thickness: float
     zeta_pot: float
+    composition: float
     constants: PhysicalConstants = field(default_factory=PhysicalConstants)
     surfactants: tuple[Surfactant, ...] = field(default_factory=tuple)
+    
 
     @lru_cache(maxsize=128)
     def inverse_debye(self, concentration: float) -> float:
@@ -88,15 +89,14 @@ class SolutionState:
         
     @lru_cache(maxsize=128)
     def total_ionic_strength(self, concentration: float) -> float:
-        total = 0
-        for surf in self.surfactants:
-            total += surf.ionic_strength(concentration)
+        total = 0 
+        total += self.surfactants[0].ionic_strength(self.composition*concentration)
+        total += self.surfactants[1].ionic_strength((1 - self.composition)*concentration)
         return total
 
 
 @dataclass(frozen=True)
 class RodSpecies:
-    name: str
     width: float
     length: float
     hamaker: float
@@ -106,7 +106,7 @@ class RodSpecies:
 ### ------------------------
 ### ACTUAL POTENTIALS
 ### ------------------------
-
+'''
 class InteractionModel(ABC):
     @abstractmethod
     def pair_energy_per_length(
@@ -118,34 +118,44 @@ class InteractionModel(ABC):
         concentration: float,
     ) -> float:
         raise NotImplementedError
-
+'''
 
 @dataclass(frozen=True)
-class VdWInteraction(InteractionModel):
-   
-    def pair_energy_per_length(self, a, b, separation, solution, concentration):
+class VdWInteraction:
+     def energy(self, a, b, separation):
+        separation = np.asarray(separation, dtype=float)
+
         r1 = a.width / 2.0
         r2 = b.width / 2.0
         gap = separation - r1 - r2
-        if gap <= 0:
-            return np.inf
 
-        hamaker = np.sqrt(a.hamaker*b.hamaker)
-        return -hamaker / (12.0 * np.sqrt(2.0) * gap**1.5) * np.sqrt(r1 * r2 / (r1 + r2))
+        hamaker = np.sqrt(a.hamaker * b.hamaker)
+        prefactor = -hamaker / (12.0 * np.sqrt(2.0)) * np.sqrt(r1 * r2 / (r1 + r2))
+
+        energy = np.full_like(gap, np.inf, dtype=float)
+        mask = gap > 0
+        energy[mask] = prefactor / gap[mask] ** 1.5
+
+        return energy.item() if energy.ndim == 0 else energy
 
 @dataclass(frozen=True)
-class ElectrostaticInteraction(InteractionModel):
-    def pair_energy_per_length(self, a, b, separation, solution, concentration):
+class ElectrostaticInteraction:
+    def energy(self, a, b, separation, solution, concentration):
+        separation = np.asarray(separation, dtype=float)
+
         r1 = a.width / 2.0 + solution.layer_thickness
         r2 = b.width / 2.0 + solution.layer_thickness
         gap = separation - r1 - r2
-        if gap <= 0:
-            return np.inf
 
         ionic_strength = solution.total_ionic_strength(concentration)
         kappa = solution.inverse_debye(ionic_strength)
+        prefactor = np.sqrt(kappa / (2.0 * np.pi) * (r1 * r2 / (r1 + r2))) * self.Z(concentration, solution)
 
-        return np.sqrt(kappa / (2.0 * np.pi) * (r1 * r2 / (r1 + r2))) * self.Z(concentration, solution) * np.exp(-kappa * gap)
+        energy = np.full_like(gap, np.inf, dtype=float)
+        mask = gap > 0
+        energy[mask] = prefactor * np.exp(-kappa * gap[mask])
+
+        return energy.item() if energy.ndim == 0 else energy
     
     def Z(self, concentration: float, solution) -> float:
         return 64.0 * np.pi*solution.constants.eps_0 * solution.eps_r * (solution.constants.k_B * solution.temperature / solution.constants.e_charge)** 2 *np.tanh(solution.constants.e_charge *solution.zeta_pot* solution.total_ionic_strength(concentration)/ (4.0 * solution.constants.k_B * solution.temperature)) ** 2
@@ -153,7 +163,7 @@ class ElectrostaticInteraction(InteractionModel):
     
     
 @dataclass(frozen=True)
-class DepletionInteraction(InteractionModel):
+class DepletionInteraction():
     depletant: Surfactant
 
     def pair_energy_per_length(self, a, b, separation, solution, concentration):
@@ -224,108 +234,6 @@ class PhaseModel:
         return total
 
 
-# ---------------------------------------------------------------------
-# Build your current system
-# ---------------------------------------------------------------------
-
-def build_default_model():
-    constants = PhysicalConstants()
-
-    solution = SolutionState(
-        temperature=293.0,
-        eps_r=80.10,
-        ctac_thickness=3.2e-9,
-        constants=constants,
-        surfactants=[],
-    )
-
-    ctac = CTACModel(
-        name="CTAC",
-        cmc=1.31,
-        aggregation_number=120.0,
-        molecular_volume=4.309e-28,
-        charge_fraction=0.28,
-        depletant_core_diameter=4.62e-9,
-        delta=0.725,
-    )
-
-    second_surfactant = CTACModel(
-        name="SurfactantB",
-        cmc=0.8,
-        aggregation_number=90.0,
-        molecular_volume=3.8e-28,
-        charge_fraction=0.12,
-        depletant_core_diameter=5.5e-9,
-        delta=0.6,
-        ionic_strength_prefactor=0.15,
-    )
-
-    solution.surfactants = [ctac, second_surfactant]
-
-    big = RodSpecies(
-        name="big",
-        width=44e-9,
-        length=131e-9,
-        hamaker=40e-20,
-        surface=SurfaceState(thickness=3.2e-9, potential=0.035),
-    )
-
-    small = RodSpecies(
-        name="small",
-        width=13e-9,
-        length=131e-9,
-        hamaker=40e-20,
-        surface=SurfaceState(thickness=3.2e-9, potential=0.035),
-    )
-
-    species = {"big": big, "small": small}
-
-    interactions = [
-        VdWInteraction(),
-        ElectrostaticInteraction(),
-        DepletionInteraction([ctac, second_surfactant]),
-    ]
-
-    hex_big = PhaseRecipe(
-        name="hex_big",
-        pair_terms=[PairTerm(count=6, species_a="big", species_b="big", separation_scale=1.0, length_mode="a")],
-        double_counting_factor=2.0,
-        particle_normalization=1.0,
-    )
-
-    hex_small = PhaseRecipe(
-        name="hex_small",
-        pair_terms=[PairTerm(count=6, species_a="small", species_b="small", separation_scale=1.0, length_mode="a")],
-        double_counting_factor=2.0,
-        particle_normalization=1.0,
-    )
-
-    s1 = PhaseRecipe(
-        name="s1",
-        pair_terms=[
-            PairTerm(count=4, species_a="big", species_b="big", separation_scale=1.0, length_mode="a"),
-            PairTerm(count=8, species_a="big", species_b="small", separation_scale=np.sqrt(2.0), length_mode="min"),
-        ],
-        double_counting_factor=2.0,
-        particle_normalization=2.0,
-    )
-
-    sigma = PhaseRecipe(
-        name="sigma",
-        pair_terms=[
-            PairTerm(count=40, species_a="big", species_b="big", separation_scale=1.0, length_mode="a"),
-            PairTerm(count=32, species_a="big", species_b="small", separation_scale=np.sqrt(2.0), length_mode="min"),
-        ],
-        double_counting_factor=2.0,
-        particle_normalization=12.0,
-    )
-
-    return solution, species, interactions, {
-        "hex_big": hex_big,
-        "hex_small": hex_small,
-        "s1": s1,
-        "sigma": sigma,
-    }
 
 
 # ---------------------------------------------------------------------
