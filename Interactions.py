@@ -55,7 +55,10 @@ class Surfactant:
     
     @lru_cache(maxsize=128)
     def ionic_strength(self, concentration: float) -> float:
-        return self.cmc + self.charge_fraction * (concentration - self.cmc)
+        if concentration < self.cmc:
+            return concentration
+        else:
+            return self.cmc + self.charge_fraction * (concentration - self.cmc)
     
     #arguments to be made on whether to hard code it as a member since we kind of have it....
     #@lru_cache(maxsize=128)
@@ -104,11 +107,11 @@ class SolutionState:
     constants: PhysicalConstants = field(default_factory=PhysicalConstants)
     surfactants: tuple[Surfactant, ...] = field(default_factory=tuple)
     
-
+#maybe a two is missing??
     @lru_cache(maxsize=128)
     def inverse_debye(self, concentration: float) -> float:
         return np.sqrt(
-            concentration
+            self.total_ionic_strength(concentration)
             * self.constants.N_A
             * self.constants.e_charge**2
             / (self.constants.eps_0 * self.eps_r * self.constants.k_B * self.temperature)
@@ -117,8 +120,8 @@ class SolutionState:
     @lru_cache(maxsize=128)
     def total_ionic_strength(self, concentration: float) -> float:
         total = 0 
-        total += self.surfactants[0].ionic_strength(self.composition*concentration)
-        total += self.surfactants[1].ionic_strength((1 - self.composition)*concentration)
+        total += self.surfactants[1].ionic_strength(self.composition*concentration)
+        total += self.surfactants[0].ionic_strength((1 - self.composition)*concentration)
         return total
 
 
@@ -197,17 +200,18 @@ class DepletionInteraction:
         energy = np.zeros_like(sep, dtype=float)
 
         # two surfactants: fractions = composition and (1 - composition)
-        fracs = (solution.composition, 1.0 - solution.composition)
+        fracs = (1.0 - solution.composition, solution.composition)
         for idx, frac in enumerate(fracs):
             surf = solution.surfactants[idx]
             conc_i = frac * concentration
+            if conc_i < surf.cmc:
+                continue
             depl_D = surf.effective_depletant_diameter(conc_i, solution)
 
             r1 = a.width / 2.0 + t_eff + depl_D / 2.0
             r2 = b.width / 2.0 + t_eff + depl_D / 2.0
             overlap = circle_overlap_area(r1, r2, sep)
             pressure = surf.osmotic_pressure(conc_i, solution)
-            print(pressure)
             energy += -pressure * overlap
 
         return energy.item() if energy.ndim == 0 else energy
