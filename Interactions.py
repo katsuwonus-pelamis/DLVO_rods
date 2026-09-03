@@ -162,7 +162,7 @@ class VdWInteraction:
         hamaker = np.sqrt(a.hamaker * b.hamaker)
         prefactor = -hamaker / (12.0 * np.sqrt(2.0)) * np.sqrt(r1 * r2 / (r1 + r2))
 
-        energy = np.full_like(gap, np.inf, dtype=float)
+        energy = np.full_like(gap, np.nan, dtype=float)
         mask = gap > 0
         energy[mask] = prefactor / gap[mask] ** 1.5
 
@@ -180,7 +180,7 @@ class ElectrostaticInteraction:
         kappa = solution.inverse_debye(ionic_strength)
         prefactor = np.sqrt(kappa / (2.0 * np.pi) * (r1 * r2 / (r1 + r2))) * self.Z(solution)
 
-        energy = np.full_like(gap, np.inf, dtype=float)
+        energy = np.full_like(gap, np.nan, dtype=float)
         mask = gap > 0
         energy[mask] = prefactor * np.exp(-kappa * gap[mask])
 
@@ -215,6 +215,20 @@ class DepletionInteraction:
             energy += -pressure * overlap
 
         return energy.item() if energy.ndim == 0 else energy
+    
+
+
+#computes size dependent hamaker constant for silver particles
+# based on J. Phys. Chem. C 2012, 116, 20099-20102    
+    
+def hamaker_silver(diameter):
+    radius = diameter/2.
+    pol = [3.80349423e-03,  2.13506935e-01,  3.80520920e+00, -2.29572213e+01]
+    return np.exp(np.polyval(pol, np.log(radius)))    
+    
+
+
+
     
     
 '''
