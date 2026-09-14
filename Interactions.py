@@ -81,7 +81,7 @@ class Surfactant:
 
     @lru_cache(maxsize=128)
     def effective_depletant_diameter(self, concentration: float, env: "SolutionState") -> float:
-        kappa = env.inverse_debye(self.ionic_strength(concentration))
+        kappa = env.inverse_debye(concentration)
         return self.mycel_diameter + 2.0 * self.delta / kappa
 
     @lru_cache(maxsize=128)
@@ -176,8 +176,7 @@ class ElectrostaticInteraction:
         r1 = a.width / 2.0 + solution.layer_thickness
         r2 = b.width / 2.0 + solution.layer_thickness
         gap = separation - r1 - r2
-        ionic_strength = solution.total_ionic_strength(concentration)
-        kappa = solution.inverse_debye(ionic_strength)
+        kappa = solution.inverse_debye(concentration)
         prefactor = np.sqrt(kappa / (2.0 * np.pi) * (r1 * r2 / (r1 + r2))) * self.Z(solution)
 
         energy = np.full_like(gap, np.nan, dtype=float)
